@@ -59,7 +59,7 @@ paths:
   # For now, point to your sample file so we can test the pipeline.
   # Later you will point this to the full giant CSV on the training machine.
   sample_xlsx: "src/data/DATASET_Sample_1000.xlsx"
-  # full_csv: "PATH/TO/YOUR/GIANT.csv"
+  full_csv: "wustl_iiot_2021.csv"
 
   processed_sequences_npy: "data/processed/sequences.npy"
   processed_seq_labels_npy: "data/processed/seq_labels.npy"
@@ -71,17 +71,20 @@ dataset:
 
 model:
   input_dim: 24
-  hidden_dim: 64
+  hidden_dim: 128            # doubled from 64 — more capacity for 1M+ windows
   num_layers: 1
-  dropout: 0.0
+  dropout: 0.1               # light regularization now that model is larger
   bidirectional: false
 
 training:
-  batch_size: 32
-  learning_rate: 0.001
+  batch_size: 512
+  learning_rate: 0.001       # Adam does not benefit from linear LR scaling; 0.016 caused divergence
   epochs: 32
   seed: 42
-  device: "cpu"
+  device: "auto"             # uses cuda:0 if available, else cpu
+  amp: true                  # mixed precision (float16), disabled automatically on cpu
+  num_workers: 4             # DataLoader worker processes (Threadripper has many cores)
+  patience: 10               # more room now that LR is stable
   checkpoint_path: "experiments/results/flair_minimal.pt"
 
 evaluation:

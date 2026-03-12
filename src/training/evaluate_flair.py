@@ -35,10 +35,24 @@ from src.models.flair_model import FLAIRAutoencoder, FLAIRConfig
 
 @dataclass
 class EvalConfig:
-    batch_size: int = 128
-    device: str = "cpu"
+    batch_size: int = 2048
+    device: str = "auto"
+    num_workers: int = 4
     threshold_percentile: float = 99.0  # operational threshold uses normal-only percentile
     output_csv: str = "experiments/results/anomaly_scores.csv"
+
+
+def _resolve_device(device_str: str) -> torch.device:
+    if device_str in ("auto", "cuda"):
+        if torch.cuda.is_available():
+            dev = torch.device("cuda:0")
+            print(f"[eval] Using GPU: {torch.cuda.get_device_name(0)}")
+        else:
+            dev = torch.device("cpu")
+            print("[eval] CUDA not available, falling back to CPU")
+    else:
+        dev = torch.device(device_str)
+    return dev
 
 
 def load_checkpoint(checkpoint_path: str, device: torch.device) -> Tuple[FLAIRAutoencoder, Dict]:
@@ -56,10 +70,19 @@ def compute_scores(
     X_num: np.ndarray,
     X_cat: np.ndarray,
     batch_size: int,
-    device: torch.device
+    device: torch.device,
+    num_workers: int = 4,
 ) -> np.ndarray:
     ds = FLAIRDataset(X_num, X_cat, config=DatasetConfig(return_targets=True))
-    loader = DataLoader(ds, batch_size=batch_size, shuffle=False)
+    pin = device.type == "cuda"
+    loader = DataLoader(
+        ds,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=pin,
+        persistent_workers=num_workers > 0,
+    )
 
     scores_all = []
     for (x_num, x_cat), _ in loader:
@@ -193,33 +216,37 @@ def best_f1_threshold(y_true: np.ndarray, scores: np.ndarray) -> Tuple[float, Di
     """
     Find threshold that maximizes F1 on the provided y_true/scores.
     This is NOT an operational threshold (it uses labels), but useful as a reporting upper bound.
+    Vectorized: computes F1 across all PR-curve points in one numpy pass.
     """
     curves = roc_pr_curves(y_true, scores)
+    p = curves["precision"]
+    r = curves["recall"]
     thresholds = curves["thresholds"]
 
-    best_thr = thresholds[0]
-    best_metrics = {"f1": -1.0}
+    denom = p + r
+    f1_scores = np.where(denom > 0, 2.0 * p * r / denom, 0.0)
+    best_idx = int(np.argmax(f1_scores))
 
-    for thr in thresholds:
-        cm = confusion_from_threshold(y_true, scores, float(thr))
-        m = metrics_from_confusion(**cm)
-        if m["f1"] > best_metrics["f1"]:
-            best_metrics = m
-            best_thr = float(thr)
+    best_thr = float(thresholds[best_idx])
+    cm = confusion_from_threshold(y_true, scores, best_thr)
+    best_metrics = metrics_from_confusion(**cm)
 
     return best_thr, best_metrics
 
 
 def save_scores_csv(scores: np.ndarray, threshold: float, y_true: np.ndarray, out_path: str) -> None:
+    """Save only flagged-anomalous windows to CSV."""
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    is_anomalous = scores > threshold
+    idx = np.where(is_anomalous)[0]
     df = pd.DataFrame({
-        "sequence_id": np.arange(len(scores)),
-        "anomaly_score": scores,
-        "threshold": np.full(len(scores), threshold, dtype=np.float64),
-        "is_anomalous": (scores > threshold).astype(int),
-        "target": y_true.astype(int),
+        "sequence_id": idx,
+        "anomaly_score": scores[idx],
+        "threshold": threshold,
+        "target": y_true[idx].astype(int),
     })
     df.to_csv(out_path, index=False)
+    print(f"  {len(df):,} anomalous windows written ({len(df)/len(scores)*100:.2f}% of total)")
 
 
 if __name__ == "__main__":
@@ -235,7 +262,7 @@ if __name__ == "__main__":
         output_csv=str(_ev.get("output_csv", "experiments/results/anomaly_scores.csv")),
     )
 
-    device = torch.device(cfg.device)
+    device = _resolve_device(cfg.device)
     checkpoint_path = str(_t.get("checkpoint_path", "experiments/results/flair_minimal.pt"))
     model, _ = load_checkpoint(checkpoint_path, device)
 
@@ -245,7 +272,7 @@ if __name__ == "__main__":
     X_cat = bundle["X_cat"].astype(np.int64)
     y_seq = bundle["y_seq"].astype(np.int64)
 
-    scores = compute_scores(model, X_num, X_cat, cfg.batch_size, device)
+    scores = compute_scores(model, X_num, X_cat, cfg.batch_size, device, cfg.num_workers)
 
     # Operational threshold computed from NORMAL windows only
     normal_scores = scores[y_seq == 0]

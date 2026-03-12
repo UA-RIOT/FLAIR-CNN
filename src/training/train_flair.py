@@ -31,10 +31,25 @@ class TrainConfig:
     learning_rate: float = 1e-3
     epochs: int = 30
     seed: int = 42
-    device: str = "cpu"
+    device: str = "auto"
     checkpoint_path: str = "experiments/results/flair_minimal.pt"
     val_split: float = 0.1
     patience: Optional[int] = 5
+    num_workers: int = 4
+    amp: bool = True
+
+
+def _resolve_device(device_str: str) -> torch.device:
+    if device_str in ("auto", "cuda"):
+        if torch.cuda.is_available():
+            dev = torch.device("cuda:0")
+            print(f"[train] Using GPU: {torch.cuda.get_device_name(0)}")
+        else:
+            dev = torch.device("cpu")
+            print("[train] CUDA not available, falling back to CPU")
+    else:
+        dev = torch.device(device_str)
+    return dev
 
 
 def set_seed(seed: int) -> None:
@@ -56,22 +71,35 @@ def split_train_val_normal(Xn: np.ndarray, Xc: np.ndarray, val_split: float, see
     return Xn[tr_idx], Xc[tr_idx], Xn[val_idx], Xc[val_idx]
 
 
-def train_one_epoch(model: FLAIRAutoencoder, loader: DataLoader, optimizer: torch.optim.Optimizer, device: torch.device) -> float:
+def train_one_epoch(
+    model: FLAIRAutoencoder,
+    loader: DataLoader,
+    optimizer: torch.optim.Optimizer,
+    device: torch.device,
+    scaler: Optional[torch.amp.GradScaler] = None,
+) -> float:
     model.train()
     total = 0.0
     batches = 0
+    use_amp = scaler is not None
     for (x_num, x_cat), y_num in loader:
         x_num = x_num.to(device)
         x_cat = x_cat.to(device)
         y_num = y_num.to(device)
 
-        out = model(x_num, x_cat)
-        x_hat = out["x_hat_num"]
-        loss = model.reconstruction_loss(y_num, x_hat)
+        with torch.autocast(device_type=device.type, enabled=use_amp):
+            out = model(x_num, x_cat)
+            x_hat = out["x_hat_num"]
+            loss = model.reconstruction_loss(y_num, x_hat)
 
         optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+        if use_amp:
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            optimizer.step()
 
         total += float(loss.item())
         batches += 1
@@ -106,7 +134,7 @@ def train_from_preprocessed(
         train_cfg = TrainConfig()
 
     set_seed(train_cfg.seed)
-    device = torch.device(train_cfg.device)
+    device = _resolve_device(train_cfg.device)
 
     bundle = np.load(npz_path, allow_pickle=True)
     X_num = bundle["X_num"].astype(np.float32)  # (N,T,D_num)
@@ -155,11 +183,30 @@ def train_from_preprocessed(
     train_ds = FLAIRDataset(Xn_tr, Xc_tr, config=DatasetConfig(return_targets=True))
     val_ds = FLAIRDataset(Xn_val, Xc_val, config=DatasetConfig(return_targets=True))
 
-    train_loader = DataLoader(train_ds, batch_size=train_cfg.batch_size, shuffle=True)
-    val_loader = DataLoader(val_ds, batch_size=train_cfg.batch_size, shuffle=False)
+    pin = device.type == "cuda"
+    persistent = train_cfg.num_workers > 0
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=train_cfg.batch_size,
+        shuffle=True,
+        num_workers=train_cfg.num_workers,
+        pin_memory=pin,
+        persistent_workers=persistent,
+    )
+    val_loader = DataLoader(
+        val_ds,
+        batch_size=train_cfg.batch_size,
+        shuffle=False,
+        num_workers=train_cfg.num_workers,
+        pin_memory=pin,
+        persistent_workers=persistent,
+    )
 
     model = FLAIRAutoencoder(model_cfg).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=train_cfg.learning_rate)
+    use_amp = train_cfg.amp and device.type == "cuda"
+    scaler = torch.amp.GradScaler("cuda") if use_amp else None
+    print(f"[train] AMP: {'enabled' if use_amp else 'disabled'}  num_workers: {train_cfg.num_workers}")
 
     train_losses = []
     val_losses = []
@@ -170,7 +217,7 @@ def train_from_preprocessed(
     patience_left = train_cfg.patience if train_cfg.patience is not None else None
 
     for epoch in range(1, train_cfg.epochs + 1):
-        tr = train_one_epoch(model, train_loader, optimizer, device)
+        tr = train_one_epoch(model, train_loader, optimizer, device, scaler)
         va = eval_one_epoch(model, val_loader, device)
 
         train_losses.append(tr)
@@ -235,10 +282,12 @@ if __name__ == "__main__":
         learning_rate=float(_t.get("learning_rate", 1e-3)),
         epochs=int(_t.get("epochs", 30)),
         seed=int(_t.get("seed", 42)),
-        device=str(_t.get("device", "cpu")),
+        device=str(_t.get("device", "auto")),
         checkpoint_path=str(_t.get("checkpoint_path", "experiments/results/flair_minimal.pt")),
         val_split=float(_t.get("val_split", 0.1)),
         patience=_t.get("patience", 5),
+        num_workers=int(_t.get("num_workers", 4)),
+        amp=bool(_t.get("amp", True)),
     )
     npz_path = str(_p.get("processed_npz", "data/processed/preprocessed.npz"))
     train_from_preprocessed(npz_path, train_cfg=cfg, config_path=_config_path)
