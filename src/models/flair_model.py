@@ -37,6 +37,7 @@ class FLAIRConfig:
     # categorical embedding settings
     sport_vocab_size: int
     dport_vocab_size: int
+    proto_vocab_size: int
     embed_dim: int = 8
 
     # GRU settings
@@ -54,10 +55,11 @@ class FLAIRAutoencoder(nn.Module):
         # Embeddings (ID=0 is UNK; fine)
         self.sport_emb = nn.Embedding(cfg.sport_vocab_size, cfg.embed_dim)
         self.dport_emb = nn.Embedding(cfg.dport_vocab_size, cfg.embed_dim)
+        self.proto_emb = nn.Embedding(cfg.proto_vocab_size, cfg.embed_dim)
 
         # Combined input dim to encoder GRU
-        # x_num + [sport_emb, dport_emb]
-        combined_dim = cfg.numeric_dim + (2 * cfg.embed_dim)
+        # x_num + [sport_emb, dport_emb, proto_emb]
+        combined_dim = cfg.numeric_dim + (3 * cfg.embed_dim)
 
         enc_cfg = EncoderConfig(
             input_dim=combined_dim,
@@ -85,19 +87,21 @@ class FLAIRAutoencoder(nn.Module):
     def _combine_inputs(self, x_num: torch.Tensor, x_cat: torch.Tensor) -> torch.Tensor:
         """
         x_num: (B,T,D_num) float
-        x_cat: (B,T,2) long  [Sport_id, Dport_id]
-        returns: (B,T,D_num+2*embed_dim)
+        x_cat: (B,T,3) long  [Sport_id, Dport_id, Proto_id]
+        returns: (B,T,D_num+3*embed_dim)
         """
-        if x_cat.shape[-1] != 2:
-            raise ValueError(f"Expected x_cat last dim=2 (Sport,Dport), got {x_cat.shape[-1]}")
+        if x_cat.shape[-1] != 3:
+            raise ValueError(f"Expected x_cat last dim=3 (Sport,Dport,Proto), got {x_cat.shape[-1]}")
 
         sport_id = x_cat[..., 0]
         dport_id = x_cat[..., 1]
+        proto_id = x_cat[..., 2]
 
         sport_e = self.sport_emb(sport_id)  # (B,T,E)
         dport_e = self.dport_emb(dport_id)  # (B,T,E)
+        proto_e = self.proto_emb(proto_id)  # (B,T,E)
 
-        return torch.cat([x_num, sport_e, dport_e], dim=-1)
+        return torch.cat([x_num, sport_e, dport_e, proto_e], dim=-1)
 
     def forward(self, x_num: torch.Tensor, x_cat: torch.Tensor) -> Dict[str, torch.Tensor]:
         if x_num.ndim != 3 or x_cat.ndim != 3:

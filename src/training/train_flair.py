@@ -18,6 +18,7 @@ from typing import Dict, Optional, Tuple
 
 import numpy as np
 import torch
+import yaml
 from torch.utils.data import DataLoader
 
 from src.data.dataset import FLAIRDataset, DatasetConfig
@@ -99,6 +100,7 @@ def eval_one_epoch(model: FLAIRAutoencoder, loader: DataLoader, device: torch.de
 def train_from_preprocessed(
     npz_path: str = "data/processed/preprocessed.npz",
     train_cfg: Optional[TrainConfig] = None,
+    config_path: Optional[str] = None,
 ) -> Dict[str, object]:
     if train_cfg is None:
         train_cfg = TrainConfig()
@@ -108,11 +110,12 @@ def train_from_preprocessed(
 
     bundle = np.load(npz_path, allow_pickle=True)
     X_num = bundle["X_num"].astype(np.float32)  # (N,T,D_num)
-    X_cat = bundle["X_cat"].astype(np.int64)    # (N,T,2)
+    X_cat = bundle["X_cat"].astype(np.int64)    # (N,T,3)
     y_seq = bundle["y_seq"].astype(np.int64)    # (N,)
 
     sport_vocab = bundle["sport_vocab"][0]  # dict
     dport_vocab = bundle["dport_vocab"][0]  # dict
+    proto_vocab = bundle["proto_vocab"][0]  # dict
 
     print(f"[train] Loaded: {npz_path}")
     print(f"[train] X_num: {X_num.shape}  X_cat: {X_cat.shape}  y_seq: {y_seq.shape}")
@@ -130,15 +133,23 @@ def train_from_preprocessed(
     Xn_tr, Xc_tr, Xn_val, Xc_val = split_train_val_normal(Xn, Xc, train_cfg.val_split, train_cfg.seed)
     print(f"[train] train normal: {len(Xn_tr)}  val normal: {len(Xn_val)}")
 
+    # Load model hyperparameters from config if provided, else use defaults
+    cfg_model: Dict[str, object] = {}
+    if config_path is not None:
+        with open(config_path, "r", encoding="utf-8") as _f:
+            _cfg = yaml.safe_load(_f)
+        cfg_model = _cfg.get("model", {})
+
     model_cfg = FLAIRConfig(
         numeric_dim=int(X_num.shape[-1]),
         sport_vocab_size=len(sport_vocab) + 1,  # +UNK
         dport_vocab_size=len(dport_vocab) + 1,
-        embed_dim=8,
-        hidden_dim=64,
-        num_layers=1,
-        dropout=0.0,
-        bidirectional=False,
+        proto_vocab_size=len(proto_vocab) + 1,
+        embed_dim=int(cfg_model.get("embed_dim", 8)),
+        hidden_dim=int(cfg_model.get("hidden_dim", 64)),
+        num_layers=int(cfg_model.get("num_layers", 1)),
+        dropout=float(cfg_model.get("dropout", 0.0)),
+        bidirectional=bool(cfg_model.get("bidirectional", False)),
     )
 
     train_ds = FLAIRDataset(Xn_tr, Xc_tr, config=DatasetConfig(return_targets=True))
@@ -212,13 +223,22 @@ def train_from_preprocessed(
 
 
 if __name__ == "__main__":
+    _config_path = "config.yaml"
+    with open(_config_path, "r", encoding="utf-8") as _f:
+        _cfg = yaml.safe_load(_f)
+
+    _t = _cfg.get("training", {})
+    _p = _cfg.get("paths", {})
+
     cfg = TrainConfig(
-        batch_size=32,
-        learning_rate=1e-3,
-        epochs=30,
-        device="cpu",  # set to "cuda" on the GPU machine later
-        checkpoint_path="experiments/results/flair_minimal.pt",
-        val_split=0.1,
-        patience=5,
+        batch_size=int(_t.get("batch_size", 32)),
+        learning_rate=float(_t.get("learning_rate", 1e-3)),
+        epochs=int(_t.get("epochs", 30)),
+        seed=int(_t.get("seed", 42)),
+        device=str(_t.get("device", "cpu")),
+        checkpoint_path=str(_t.get("checkpoint_path", "experiments/results/flair_minimal.pt")),
+        val_split=float(_t.get("val_split", 0.1)),
+        patience=_t.get("patience", 5),
     )
-    train_from_preprocessed("data/processed/preprocessed.npz", train_cfg=cfg)
+    npz_path = str(_p.get("processed_npz", "data/processed/preprocessed.npz"))
+    train_from_preprocessed(npz_path, train_cfg=cfg, config_path=_config_path)

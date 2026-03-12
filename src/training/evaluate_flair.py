@@ -26,6 +26,7 @@ from typing import Dict, Tuple
 import numpy as np
 import pandas as pd
 import torch
+import yaml
 from torch.utils.data import DataLoader
 
 from src.data.dataset import FLAIRDataset, DatasetConfig
@@ -222,12 +223,24 @@ def save_scores_csv(scores: np.ndarray, threshold: float, y_true: np.ndarray, ou
 
 
 if __name__ == "__main__":
-    cfg = EvalConfig()
+    with open("config.yaml", "r", encoding="utf-8") as _f:
+        _yaml = yaml.safe_load(_f)
+
+    _ev = _yaml.get("evaluation", {})
+    _t = _yaml.get("training", {})
+    _p = _yaml.get("paths", {})
+
+    cfg = EvalConfig(
+        threshold_percentile=float(_ev.get("threshold_percentile", 99.0)),
+        output_csv=str(_ev.get("output_csv", "experiments/results/anomaly_scores.csv")),
+    )
 
     device = torch.device(cfg.device)
-    model, _ = load_checkpoint("experiments/results/flair_minimal.pt", device)
+    checkpoint_path = str(_t.get("checkpoint_path", "experiments/results/flair_minimal.pt"))
+    model, _ = load_checkpoint(checkpoint_path, device)
 
-    bundle = np.load("data/processed/preprocessed.npz", allow_pickle=True)
+    npz_path = str(_p.get("processed_npz", "data/processed/preprocessed.npz"))
+    bundle = np.load(npz_path, allow_pickle=True)
     X_num = bundle["X_num"].astype(np.float32)
     X_cat = bundle["X_cat"].astype(np.int64)
     y_seq = bundle["y_seq"].astype(np.int64)

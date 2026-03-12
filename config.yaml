@@ -18,6 +18,7 @@ features:
   categorical:
     - Sport
     - Dport
+    - Proto
 
   numeric:
     - Mean
@@ -44,8 +45,8 @@ features:
 
 # IMPORTANT (for Step 3 preprocessing):
 # We will feed the model a single feature vector per flow row.
-# For now, we will pass Sport/Dport as numeric columns directly (no embeddings yet)
-# so input_dim = 23.
+# Sport, Dport, Proto are categorical (embedded); 21 numeric features.
+# input_dim = 24 total.
 
 preprocess:
   window_size: 10                 # choose later; 10 is a reasonable start
@@ -69,7 +70,7 @@ dataset:
   return_targets: true
 
 model:
-  input_dim: 23
+  input_dim: 24
   hidden_dim: 64
   num_layers: 1
   dropout: 0.0
@@ -78,7 +79,7 @@ model:
 training:
   batch_size: 32
   learning_rate: 0.001
-  epochs: 5
+  epochs: 32
   seed: 42
   device: "cpu"
   checkpoint_path: "experiments/results/flair_minimal.pt"

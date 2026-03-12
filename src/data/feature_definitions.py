@@ -17,6 +17,7 @@ IMPORTANT:
 CATEGORICAL_FEATURES = [
     "Sport",
     "Dport",
+    "Proto",
 ]
 
 # Everything else is numeric.
@@ -59,7 +60,7 @@ NUMERIC_FEATURES = [
     "DIntPkt",
 ]
 
-# The exact 23 features the model consumes (2 categorical + 21 numeric)
+# The exact 24 features the model consumes (3 categorical + 21 numeric)
 ALL_FEATURE_NAMES = CATEGORICAL_FEATURES + NUMERIC_FEATURES
 
 # Optional: keep a dict for descriptions (nice for thesis figures/logging)
@@ -67,6 +68,7 @@ FLOW_FEATURES = {
     "Mean": "Average duration of active flows",
     "Sport": "Source port number",
     "Dport": "Destination port number",
+    "Proto": "Transport layer protocol (e.g., TCP, UDP)",
     "SrcPkts": "Source→Destination packet count",
     "DstPkts": "Destination→Source packet count",
     "TotPkts": "Total transaction packet count",

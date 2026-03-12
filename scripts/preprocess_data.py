@@ -7,18 +7,19 @@ for a GRU autoencoder with categorical embeddings.
 Outputs (single bundle):
   data/processed/preprocessed.npz containing:
     - X_num:       (N, T, D_num) float32  normalized numeric features
-    - X_cat:       (N, T, D_cat) int64    categorical IDs (Sport, Dport)
+    - X_cat:       (N, T, D_cat) int64    categorical IDs (Sport, Dport, Proto)
     - y_seq:       (N,)          int64    window label (1 if any Target==1 in window else 0)
     - mu:          (D_num,)      float32  normalization mean (computed on normal rows only)
     - sigma:       (D_num,)      float32  normalization std (computed on normal rows only)
     - num_features (D_num,)      object   list of numeric feature names in order
     - cat_features (D_cat,)      object   list of categorical feature names in order
-    - sport_vocab / dport_vocab  object   dict: port_value -> id
+    - sport_vocab / dport_vocab / proto_vocab  object   dict: value -> id
 
 Design choices:
 - We normalize ONLY numeric features using normal rows (Target==0).
-- We treat Sport/Dport as categorical IDs and DO NOT normalize them.
-- We reserve ID=0 for UNK (unseen ports).
+- We treat Sport/Dport/Proto as categorical IDs and DO NOT normalize them.
+- We reserve ID=0 for UNK (unseen values).
+- Feature lists are read from config.yaml (features.categorical / features.numeric).
 """
 
 from __future__ import annotations
@@ -31,7 +32,6 @@ import numpy as np
 import pandas as pd
 import yaml
 
-from src.data.feature_definitions import NUMERIC_FEATURES, CATEGORICAL_FEATURES
 
 
 def load_config(config_path: str) -> dict:
@@ -140,6 +140,9 @@ def build_sliding_windows(
 def main(config_path: str = "config.yaml") -> None:
     cfg = load_config(config_path)
 
+    CATEGORICAL_FEATURES: List[str] = cfg["features"]["categorical"]
+    NUMERIC_FEATURES: List[str] = cfg["features"]["numeric"]
+
     time_col = cfg["data"]["time_column"]
     label_col = cfg["data"]["label_column"]
 
@@ -188,11 +191,13 @@ def main(config_path: str = "config.yaml") -> None:
     # Build vocab from ALL rows in this dataset file (label-agnostic)
     sport_vocab = build_vocab(work["Sport"])
     dport_vocab = build_vocab(work["Dport"])
+    proto_vocab = build_vocab(work["Proto"])
 
     sport_ids = encode_with_vocab(work["Sport"], sport_vocab)
     dport_ids = encode_with_vocab(work["Dport"], dport_vocab)
+    proto_ids = encode_with_vocab(work["Proto"], proto_vocab)
 
-    X_cat = np.stack([sport_ids, dport_ids], axis=1).astype(np.int64)  # (M, 2)
+    X_cat = np.stack([sport_ids, dport_ids, proto_ids], axis=1).astype(np.int64)  # (M, 3)
 
     # ---------------------------
     # Numeric: z-score normalize using NORMAL rows only
@@ -222,6 +227,7 @@ def main(config_path: str = "config.yaml") -> None:
         cat_features=np.array(CATEGORICAL_FEATURES, dtype=object),
         sport_vocab=np.array([sport_vocab], dtype=object),
         dport_vocab=np.array([dport_vocab], dtype=object),
+        proto_vocab=np.array([proto_vocab], dtype=object),
     )
 
     print(f"[preprocess] saved: {out_npz}")
@@ -230,6 +236,7 @@ def main(config_path: str = "config.yaml") -> None:
     print(f"[preprocess] y_seq shape: {y_seq.shape}  attack_windows={int(y_seq.sum())}/{len(y_seq)}")
     print(f"[preprocess] Sport vocab size: {len(sport_vocab)+1} (including UNK)")
     print(f"[preprocess] Dport vocab size: {len(dport_vocab)+1} (including UNK)")
+    print(f"[preprocess] Proto vocab size: {len(proto_vocab)+1} (including UNK)")
 
 
 if __name__ == "__main__":
