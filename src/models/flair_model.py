@@ -19,11 +19,13 @@ Loss/anomaly score computed on numeric reconstruction only.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from .encoder import GRUEncoder, EncoderConfig
 from .decoder import GRUDecoder, DecoderConfig
@@ -45,6 +47,10 @@ class FLAIRConfig:
     num_layers: int = 1
     dropout: float = 0.0
     bidirectional: bool = False
+
+    # Weight applied to the categorical reconstruction loss terms relative to MSE.
+    # Each CE term is normalized by log(vocab_size) to bring it onto a similar scale.
+    cat_loss_weight: float = 0.1
 
 
 class FLAIRAutoencoder(nn.Module):
@@ -72,13 +78,16 @@ class FLAIRAutoencoder(nn.Module):
 
         latent_dim = self.encoder.output_dim
 
-        # Decoder reconstructs NUMERIC features only
+        # Decoder reconstructs numeric features + predicts categorical IDs
         dec_cfg = DecoderConfig(
             latent_dim=latent_dim,
             hidden_dim=cfg.hidden_dim,
             num_layers=cfg.num_layers,
             dropout=cfg.dropout,
-            output_dim=cfg.numeric_dim
+            output_dim=cfg.numeric_dim,
+            sport_vocab_size=cfg.sport_vocab_size,
+            dport_vocab_size=cfg.dport_vocab_size,
+            proto_vocab_size=cfg.proto_vocab_size,
         )
         self.decoder = GRUDecoder(dec_cfg)
 
@@ -115,15 +124,73 @@ class FLAIRAutoencoder(nn.Module):
         x_in = self._combine_inputs(x_num, x_cat)  # (B,T,combined_dim)
 
         latent, _ = self.encoder(x_in)
-        x_hat_num = self.decoder(latent, seq_len=T)  # (B,T,D_num)
+        dec_out = self.decoder(latent, seq_len=T)
 
-        return {"x_hat_num": x_hat_num, "latent": latent}
+        return {
+            "x_hat_num": dec_out["recon_num"],
+            "latent": latent,
+            **{k: v for k, v in dec_out.items() if k != "recon_num"},
+        }
 
-    def reconstruction_loss(self, x_num: torch.Tensor, x_hat_num: torch.Tensor) -> torch.Tensor:
-        return self.mse(x_hat_num, x_num)
+    def reconstruction_loss(
+        self,
+        x_num: torch.Tensor,
+        x_hat_num: torch.Tensor,
+        x_cat: Optional[torch.Tensor] = None,
+        fwd_out: Optional[Dict[str, torch.Tensor]] = None,
+    ) -> torch.Tensor:
+        loss = self.mse(x_hat_num, x_num)
+
+        if x_cat is not None and fwd_out is not None:
+            B, T = x_cat.shape[:2]
+            cat_ce = torch.tensor(0.0, device=x_num.device)
+            n_heads = 0
+
+            if "sport_logits" in fwd_out:
+                ce = F.cross_entropy(fwd_out["sport_logits"].reshape(B * T, -1), x_cat[..., 0].reshape(B * T))
+                cat_ce = cat_ce + ce / math.log(self.cfg.sport_vocab_size)
+                n_heads += 1
+            if "dport_logits" in fwd_out:
+                ce = F.cross_entropy(fwd_out["dport_logits"].reshape(B * T, -1), x_cat[..., 1].reshape(B * T))
+                cat_ce = cat_ce + ce / math.log(self.cfg.dport_vocab_size)
+                n_heads += 1
+            if "proto_logits" in fwd_out:
+                ce = F.cross_entropy(fwd_out["proto_logits"].reshape(B * T, -1), x_cat[..., 2].reshape(B * T))
+                cat_ce = cat_ce + ce / math.log(self.cfg.proto_vocab_size)
+                n_heads += 1
+
+            if n_heads > 0:
+                loss = loss + self.cfg.cat_loss_weight * (cat_ce / n_heads)
+
+        return loss
 
     @torch.no_grad()
     def anomaly_score(self, x_num: torch.Tensor, x_cat: torch.Tensor) -> torch.Tensor:
         out = self.forward(x_num, x_cat)
         x_hat = out["x_hat_num"]
-        return torch.mean((x_hat - x_num) ** 2, dim=(1, 2))  # (B,)
+
+        # Numerical MSE per window: mean over (T, D_num) → (B,)
+        score = torch.mean((x_hat - x_num) ** 2, dim=(1, 2))
+
+        # Categorical CE per window (normalized by log(vocab_size)) → (B,)
+        B, T = x_cat.shape[:2]
+        cat_score = torch.zeros(B, device=x_num.device)
+        n_heads = 0
+
+        if "sport_logits" in out:
+            ce = F.cross_entropy(out["sport_logits"].reshape(B * T, -1), x_cat[..., 0].reshape(B * T), reduction="none")
+            cat_score = cat_score + ce.reshape(B, T).mean(1) / math.log(self.cfg.sport_vocab_size)
+            n_heads += 1
+        if "dport_logits" in out:
+            ce = F.cross_entropy(out["dport_logits"].reshape(B * T, -1), x_cat[..., 1].reshape(B * T), reduction="none")
+            cat_score = cat_score + ce.reshape(B, T).mean(1) / math.log(self.cfg.dport_vocab_size)
+            n_heads += 1
+        if "proto_logits" in out:
+            ce = F.cross_entropy(out["proto_logits"].reshape(B * T, -1), x_cat[..., 2].reshape(B * T), reduction="none")
+            cat_score = cat_score + ce.reshape(B, T).mean(1) / math.log(self.cfg.proto_vocab_size)
+            n_heads += 1
+
+        if n_heads > 0:
+            score = score + self.cfg.cat_loss_weight * (cat_score / n_heads)
+
+        return score  # (B,)

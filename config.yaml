@@ -75,6 +75,7 @@ model:
   num_layers: 1
   dropout: 0.1               # light regularization now that model is larger
   bidirectional: false
+  cat_loss_weight: 0.1       # weight on categorical CE terms relative to numeric MSE
 
 training:
   batch_size: 512

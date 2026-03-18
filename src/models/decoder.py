@@ -25,7 +25,7 @@ the same feature vector per timestep.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Tuple
+from typing import Dict, Tuple
 
 import torch
 import torch.nn as nn
@@ -48,12 +48,21 @@ class DecoderConfig:
     output_dim:
         Number of features per flow we want to reconstruct.
         In an autoencoder, this should match the encoder input_dim.
+    sport_vocab_size:
+        Source port vocabulary size (for categorical reconstruction head).
+    dport_vocab_size:
+        Destination port vocabulary size.
+    proto_vocab_size:
+        Protocol vocabulary size.
     """
     latent_dim: int
     hidden_dim: int = 64
     num_layers: int = 1
     dropout: float = 0.0
     output_dim: int = 10
+    sport_vocab_size: int = 0
+    dport_vocab_size: int = 0
+    proto_vocab_size: int = 0
 
 
 class GRUDecoder(nn.Module):
@@ -87,6 +96,11 @@ class GRUDecoder(nn.Module):
 
         # Map decoder GRU outputs back to the reconstructed feature space
         self.hidden_to_output = nn.Linear(cfg.hidden_dim, cfg.output_dim)
+
+        # Categorical reconstruction heads (predict port/protocol IDs at each timestep)
+        self.sport_head = nn.Linear(cfg.hidden_dim, cfg.sport_vocab_size) if cfg.sport_vocab_size > 0 else None
+        self.dport_head = nn.Linear(cfg.hidden_dim, cfg.dport_vocab_size) if cfg.dport_vocab_size > 0 else None
+        self.proto_head = nn.Linear(cfg.hidden_dim, cfg.proto_vocab_size) if cfg.proto_vocab_size > 0 else None
 
     def forward(self, latent: torch.Tensor, seq_len: int) -> torch.Tensor:
         """
@@ -123,7 +137,16 @@ class GRUDecoder(nn.Module):
 
         dec_outputs, _ = self.gru(decoder_inputs, h0)
 
-        # Map GRU hidden outputs to reconstructed features
+        # Map GRU hidden outputs to reconstructed numeric features
         recon = self.hidden_to_output(dec_outputs)  # (batch, seq_len, output_dim)
 
-        return recon
+        # Categorical logits (if heads are present)
+        out: Dict[str, torch.Tensor] = {"recon_num": recon}
+        if self.sport_head is not None:
+            out["sport_logits"] = self.sport_head(dec_outputs)   # (batch, seq_len, sport_vocab_size)
+        if self.dport_head is not None:
+            out["dport_logits"] = self.dport_head(dec_outputs)   # (batch, seq_len, dport_vocab_size)
+        if self.proto_head is not None:
+            out["proto_logits"] = self.proto_head(dec_outputs)   # (batch, seq_len, proto_vocab_size)
+
+        return out

@@ -90,7 +90,7 @@ def train_one_epoch(
         with torch.autocast(device_type=device.type, enabled=use_amp):
             out = model(x_num, x_cat)
             x_hat = out["x_hat_num"]
-            loss = model.reconstruction_loss(y_num, x_hat)
+            loss = model.reconstruction_loss(y_num, x_hat, x_cat, out)
 
         optimizer.zero_grad()
         if use_amp:
@@ -118,7 +118,7 @@ def eval_one_epoch(model: FLAIRAutoencoder, loader: DataLoader, device: torch.de
 
         out = model(x_num, x_cat)
         x_hat = out["x_hat_num"]
-        loss = model.reconstruction_loss(y_num, x_hat)
+        loss = model.reconstruction_loss(y_num, x_hat, x_cat, out)
 
         total += float(loss.item())
         batches += 1
@@ -178,6 +178,7 @@ def train_from_preprocessed(
         num_layers=int(cfg_model.get("num_layers", 1)),
         dropout=float(cfg_model.get("dropout", 0.0)),
         bidirectional=bool(cfg_model.get("bidirectional", False)),
+        cat_loss_weight=float(cfg_model.get("cat_loss_weight", 0.1)),
     )
 
     train_ds = FLAIRDataset(Xn_tr, Xc_tr, config=DatasetConfig(return_targets=True))
