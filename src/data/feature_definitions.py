@@ -1,7 +1,7 @@
 """
 feature_definitions.py
 
-Defines the 23 flow-level features used by FLAIR for the WUSTL-IIoT dataset,
+Defines the 24 flow-level features used by FLAIR for the WUSTL-IIoT dataset,
 matching Table III ("Selected Traffic Features") from the paper.
 
 IMPORTANT:

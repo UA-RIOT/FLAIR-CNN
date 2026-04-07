@@ -319,3 +319,12 @@ if __name__ == "__main__":
     # Save CSV (operational threshold predictions)
     save_scores_csv(scores, threshold, y_seq, cfg.output_csv)
     print(f"\nSaved scores to: {cfg.output_csv}")
+
+    # Save full CSV (all windows) for live demo
+    full_csv_path = "experiments/results/anomaly_scores_full.csv"
+    pd.DataFrame({
+        "window_idx": np.arange(len(scores)),
+        "anomaly_score": scores.astype(np.float32),
+        "y_true": y_seq.astype(int),
+    }).to_csv(full_csv_path, index=False)
+    print(f"Saved full scores to: {full_csv_path}")
