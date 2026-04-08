@@ -1,0 +1,61 @@
+# -----------------------------------------------
+# CNN Autoencoder Configuration
+# Flow-level intrusion detection via reconstruction
+# -----------------------------------------------
+#
+# Training strategy:
+#   - Model trains ONLY on normal windows (target=0)
+#   - 'target' is NEVER an input to the model
+#   - Intrusion detection is purely from reconstruction error
+#   - High MSE(x_hat_num, x_num) → anomaly (likely target=1)
+#
+# Data paths are relative to the FLAIR root directory.
+# Run scripts from FLAIR root:  python CNN/train_cnn.py
+
+paths:
+  processed_npz: "data/processed/preprocessed.npz"   # shared with GRU version
+
+model:
+  # Embedding size for Sport/Dport/Proto categorical features
+  embed_dim: 8
+
+  # Conv1D channel progression for encoder: [64, 128, 128]
+  # Decoder mirrors this in reverse: [128, 128, 64]
+  encoder_channels: [64, 128, 128]
+
+  # Latent vector dimension (compact window summary)
+  latent_dim: 128
+
+  # Conv kernel size (must be odd; 3 = receptive field of 3 flows)
+  kernel_size: 3
+
+  # Weight on categorical CE terms relative to numeric MSE
+  cat_loss_weight: 0.1
+
+training:
+  batch_size: 512
+  learning_rate: 0.001
+  epochs: 32
+  seed: 42
+  device: "auto"          # cuda:0 if available, else cpu
+  amp: true               # mixed precision; auto-disabled on CPU
+  num_workers: 0          # 0 = safe on Windows; increase on Linux
+  # Temporal split of normal windows (chronological — no shuffling):
+  #   train | val | test  =  (1 - val_split - test_split) | val_split | test_split
+  # To reproduce the three split ratios: change val_split and test_split together.
+  #   80/10/10:  val_split: 0.1   test_split: 0.1
+  #   70/15/15:  val_split: 0.15  test_split: 0.15
+  #   60/20/20:  val_split: 0.2   test_split: 0.2
+  val_split: 0.1
+  test_split: 0.1
+  patience: 10            # early stopping patience
+  checkpoint_path: "CNN/experiments/results/cnn_minimal.pt"
+
+evaluation:
+  threshold_percentile: 99    # anomaly threshold = 99th pct of held-out normal scores
+  test_normal_split: 0.1      # must match training.test_split
+  # attack_sample_rate: fraction of attack windows included in the test set.
+  #   1.0  = all attacks (~54% attack rate) — use for TPR/FPR/ROC AUC comparisons
+  #   ~0.075 = subsample to match the natural ~7% attack rate — use for accuracy/F1
+  attack_sample_rate: 1.0
+  output_csv: "CNN/experiments/results/anomaly_scores.csv"
