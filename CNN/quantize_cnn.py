@@ -36,7 +36,7 @@ def make_calibration_reader(npz_path: str, n_samples: int):
         from onnxruntime.quantization.calibrate import CalibrationDataReader
     except ImportError:
         print("[quantize] ERROR: onnxruntime not installed.")
-        print("           Activate the Ryzen AI conda env: conda activate <env-name>")
+        print("           Activate the Ryzen AI conda env: conda activate ryzen-ai-1.7.0")
         sys.exit(1)
 
     bundle = np.load(npz_path, allow_pickle=True)
@@ -52,7 +52,6 @@ def make_calibration_reader(npz_path: str, n_samples: int):
 
     class CNNCalibrationReader(CalibrationDataReader):
         def __init__(self):
-            # One window per call — matches the static batch-size-1 ONNX export shape
             self.data = [
                 {"x_num": Xn[i : i + 1], "x_cat": Xc[i : i + 1]}
                 for i in range(len(Xn))
@@ -79,17 +78,16 @@ def quantize(
     n_calib: int = N_CALIB,
 ) -> None:
     try:
-        from quark.onnx import ModelQuantizer
-        from quark.onnx.quantization.config import Config, get_default_config
+        from quark.onnx import ModelQuantizer, QuantizationConfig
     except ImportError:
         print("[quantize] ERROR: AMD Quark not found.")
-        print("           Make sure the Ryzen AI conda environment is activated.")
-        print("           Quark is pre-installed with the Ryzen AI software package.")
+        print("           Make sure the Ryzen AI conda environment is activated:")
+        print("           conda activate ryzen-ai-1.7.0")
         sys.exit(1)
 
     if not Path(onnx_path).exists():
         print(f"[quantize] ERROR: ONNX model not found: {onnx_path}")
-        print("           Run python CNN/export_onnx.py first.")
+        print("           Run python CNN/export_onnx.py on the training machine first.")
         sys.exit(1)
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
@@ -97,16 +95,12 @@ def quantize(
 
     print(f"[quantize] Input:  {onnx_path}")
     print(f"[quantize] Output: {output_path}")
-    print("[quantize] Running INT8 quantization (XINT8 config for AMD XDNA NPU)...")
+    print("[quantize] Running INT8 quantization for AMD XDNA NPU...")
     print("[quantize] This may take a few minutes...")
 
-    quant_config = Config(global_quant_config=get_default_config("XINT8"))
-    quantizer = ModelQuantizer(quant_config)
-    quantizer.quantize_model(
-        input_model_path=onnx_path,
-        output_model_path=output_path,
-        calibration_data_reader=reader,
-    )
+    quant_config = QuantizationConfig(data_reader=reader)
+    quantizer = ModelQuantizer(onnx_path, quant_config)
+    quantizer.quantize_model(output_path)
 
     print(f"[quantize] Done. Quantized model saved: {output_path}")
 
