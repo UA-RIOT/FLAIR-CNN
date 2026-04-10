@@ -361,3 +361,17 @@ if __name__ == "__main__":
         "y_true": y_test.astype(int),
     }).to_csv(full_csv, index=False)
     print(f"[eval] Full test scores saved: {full_csv}")
+
+    # Save deployment metadata — threshold needed by infer_cnn_npu.py on the NPU machine.
+    # Run evaluate_cnn.py on the training machine and commit this file before quantizing.
+    meta_path = "CNN/experiments/results/cnn_deploy_meta.npz"
+    np.savez(
+        meta_path,
+        threshold=np.float32(threshold),
+        best_f1_threshold=np.float32(best_thr),
+        threshold_percentile=np.float32(cfg.threshold_percentile),
+        window_size=np.int64(X_num.shape[1]),
+    )
+    print(f"[eval] Deploy metadata saved: {meta_path}")
+    print(f"[eval]   p{cfg.threshold_percentile:.0f} threshold:    {threshold:.6f}")
+    print(f"[eval]   best-F1 threshold: {best_thr:.6f}")
