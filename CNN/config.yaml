@@ -39,7 +39,7 @@ training:
   seed: 42
   device: "auto"          # cuda:0 if available, else cpu
   amp: true               # mixed precision; auto-disabled on CPU
-  num_workers: 0          # 0 = safe on Windows; increase on Linux
+  num_workers: 8         # 0 = safe on Windows; increase on Linux
   # Temporal split of normal windows (chronological — no shuffling):
   #   train | val | test  =  (1 - val_split - test_split) | val_split | test_split
   # To reproduce the three split ratios: change val_split and test_split together.
