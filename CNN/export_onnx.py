@@ -45,7 +45,7 @@ from CNN.models.cnn_autoencoder import CNNAutoencoder, CNNConfig
 def export(
     checkpoint_path: str = "CNN/experiments/results/cnn_minimal.pt",
     output_path: str = "CNN/experiments/results/cnn_minimal.onnx",
-    opset: int = 17,
+    opset: int = 18,
 ) -> None:
     print(f"[export] Loading checkpoint: {checkpoint_path}")
     ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
@@ -109,7 +109,8 @@ def export(
         print(f"\n[export] Op types in graph: {op_types}")
         npu_ok = {"Conv", "BatchNormalization", "Relu", "GlobalAveragePool", "Gemm",
                   "ConvTranspose", "Gather", "Add", "Reshape", "Transpose", "Flatten",
-                  "Constant", "Cast", "Shape", "Unsqueeze", "Concat", "Squeeze"}
+                  "Constant", "Cast", "Shape", "Unsqueeze", "Concat", "Squeeze",
+                  "ReduceMean"}  # AdaptiveAvgPool1d exports as ReduceMean in newer PyTorch
         unknown = set(op_types) - npu_ok
         if unknown:
             print(f"[export] WARNING: Ops not in known-NPU list (may need CPU fallback): {unknown}")
@@ -128,4 +129,4 @@ if __name__ == "__main__":
     ckpt = str(_t.get("checkpoint_path", "CNN/experiments/results/cnn_minimal.pt"))
     out = ckpt.replace(".pt", ".onnx")
 
-    export(checkpoint_path=ckpt, output_path=out, opset=17)
+    export(checkpoint_path=ckpt, output_path=out, opset=18)
