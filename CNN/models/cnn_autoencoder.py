@@ -29,8 +29,10 @@ Data flow:
   anomaly_score = MSE(recon_num, x_num)  [+ weighted CE for categoricals]
 
 NPU note:
-  All ops used are Conv1d, BatchNorm1d, ReLU, Linear, AdaptiveAvgPool1d,
-  ConvTranspose1d, and Embedding — all supported by AMD Quark / VitisAI EP.
+  All ops used are Conv2d, BatchNorm2d, ReLU, Linear, AdaptiveAvgPool2d,
+  ConvTranspose2d, and Embedding — all supported by AMD Quark / VitisAI EP.
+  Conv2d with kernel_size=(1, k) is used instead of Conv1d so the VAIML CNN
+  compiler on the AMD XDNA NPU recognises the standard 4D NCHW tensor pattern.
 """
 
 from __future__ import annotations

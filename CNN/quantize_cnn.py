@@ -78,7 +78,8 @@ def quantize(
     n_calib: int = N_CALIB,
 ) -> None:
     try:
-        from quark.onnx import ModelQuantizer, QuantizationConfig
+        from quark.onnx import ModelQuantizer
+        from quark.onnx.quantization.config import Config, get_default_config
     except ImportError:
         print("[quantize] ERROR: AMD Quark not found.")
         print("           Make sure the Ryzen AI conda environment is activated:")
@@ -98,9 +99,41 @@ def quantize(
     print("[quantize] Running INT8 quantization for AMD XDNA NPU...")
     print("[quantize] This may take a few minutes...")
 
-    quant_config = QuantizationConfig(data_reader=reader)
-    quantizer = ModelQuantizer(onnx_path, quant_config)
-    quantizer.quantize_model(output_path)
+    # Strip the 'latent' output before quantizing.
+    # The encoder projection (Linear → latent) has no activation so it can produce
+    # negative values; Quark quantizes it to signed int8 while the VAIML TOSA backend
+    # expects unsigned uint8 — causing a type mismatch at compile time.
+    # We only need x_hat_num for anomaly scoring, so removing latent is safe.
+    import onnx as _onnx
+    model_proto = _onnx.load(onnx_path)
+    latent_outputs = [o for o in model_proto.graph.output if o.name == "latent"]
+    for o in latent_outputs:
+        model_proto.graph.output.remove(o)
+    if latent_outputs:
+        print("[quantize] Stripped 'latent' output from graph (not needed for inference)")
+
+    quant_config = get_default_config("XINT8")
+    quant_config.include_cle = False  # CLE assumes 4D image conv weights; our model uses 1D/2D convs
+    # Exclude both Linear (Gemm) layers from quantization.
+    #
+    # Root cause: the VAIML TOSA backend requires all activation tensors to be unsigned uint8,
+    # but the latent vector (output of encoder.project) can be negative — Quark therefore
+    # quantizes it as signed int8. VAIML's type inference then propagates xi8 through the
+    # reshape into the decoder, where it conflicts with the declared xui8 return type.
+    #
+    # Excluding both Gemm nodes keeps them in float32 (CPU fallback). Their downstream
+    # outputs are post-ReLU (non-negative), so Quark correctly assigns uint8 to those
+    # tensors, and all Conv/BN/ReLU layers in the encoder and decoder can still run on NPU.
+    #   node_linear   = encoder.project  (Linear 128→128,  no post-activation)
+    #   node_linear_1 = decoder.expand.0 (Linear 128→1280, followed by ReLU)
+    quant_config.nodes_to_exclude = ["node_linear", "node_linear_1"]
+    config = Config(global_quant_config=quant_config)
+    quantizer = ModelQuantizer(config)
+    quantizer.quantize_model(
+        model_input=model_proto,
+        model_output=output_path,
+        calibration_data_reader=reader,
+    )
 
     print(f"[quantize] Done. Quantized model saved: {output_path}")
 

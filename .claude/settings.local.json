@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(curl -s \"https://raw.githubusercontent.com/amd/RyzenAI-SW/main/CNN-examples/quark_quantization/quark_quantize.py\")",
+      "Bash(curl -s \"https://raw.githubusercontent.com/amd/RyzenAI-SW/main/CNN-examples/quark_quantization/advanced_quark_quantize.py\")"
+    ]
+  }
+}

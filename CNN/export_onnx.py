@@ -42,6 +42,25 @@ import yaml
 from CNN.models.cnn_autoencoder import CNNAutoencoder, CNNConfig
 
 
+def _migrate_conv1d_to_conv2d(state_dict: dict) -> dict:
+    """
+    Reshape Conv1d/ConvTranspose1d weights to Conv2d/ConvTranspose2d by inserting
+    a H=1 dimension.
+
+    Conv1d weight:        (out_ch, in_ch, k)       → (out_ch, in_ch, 1, k)
+    ConvTranspose1d weight:(in_ch, out_ch, k)       → (in_ch, out_ch, 1, k)
+    Conv1d 1×1 head:      (out_ch, in_ch, 1)       → (out_ch, in_ch, 1, 1)
+
+    All other tensors (Linear, BatchNorm, Embedding) are unchanged.
+    """
+    new_sd = {}
+    for k, v in state_dict.items():
+        if ".weight" in k and v.ndim == 3:
+            v = v.unsqueeze(2)   # insert H=1 between (Co/Ci, Ci/Co) and (k,)
+        new_sd[k] = v
+    return new_sd
+
+
 def export(
     checkpoint_path: str = "CNN/experiments/results/cnn_minimal.pt",
     output_path: str = "CNN/experiments/results/cnn_minimal.onnx",
@@ -52,7 +71,12 @@ def export(
 
     model_cfg = CNNConfig(**ckpt["model_cfg"])
     model = CNNAutoencoder(model_cfg)
-    model.load_state_dict(ckpt["model_state_dict"])
+
+    # The checkpoint was trained with Conv1d. The model files now use Conv2d with
+    # kernel_size=(1, k) for VAIML NPU compatibility. Weights are identical —
+    # Conv1d (Co, Ci, k) maps directly to Conv2d (Co, Ci, 1, k) via unsqueeze(2).
+    sd = _migrate_conv1d_to_conv2d(ckpt["model_state_dict"])
+    model.load_state_dict(sd)
     model.eval()
 
     T = model_cfg.seq_len

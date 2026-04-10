@@ -1,0 +1,13 @@
+name: cnn-demo
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+      - streamlit>=1.32.0
+      - plotly>=5.20.0
+      - onnxruntime>=1.17.0
+      - numpy>=1.24.0
+      - pandas>=2.0.0

@@ -2,7 +2,10 @@
 
 A convolutional autoencoder that detects network intrusions by learning what **normal** traffic looks like, then flagging anything that doesn't reconstruct well.
 
-This is a drop-in replacement for the GRU-based FLAIR model using only NPU-compatible operations (Conv1d, BatchNorm, ReLU, Linear) — no recurrent ops that the AMD XDNA NPU cannot run efficiently.
+This is the NPU-targeted replacement for the GRU-based FLAIR model. Every operation
+(Conv1d, BatchNorm, ReLU, Linear, ConvTranspose1d, Embedding) is compatible with the
+AMD XDNA NPU via the VitisAI Execution Provider — no recurrent ops that the NPU cannot
+run efficiently.
 
 ---
 
@@ -10,75 +13,52 @@ This is a drop-in replacement for the GRU-based FLAIR model using only NPU-compa
 
 ### The Core Idea
 
-The model is an **autoencoder**: it takes a window of network flows as input, compresses it into a small latent vector, then tries to reconstruct the original window from that vector alone.
+The model is an **autoencoder**: it takes a window of network flows as input, compresses
+it into a small latent vector, then tries to reconstruct the original window from that
+vector alone.
 
 - **Training**: only shown normal traffic (target = 0). It learns what normal looks like.
-- **Inference**: shown any window. If the reconstruction is poor → the window doesn't look normal → likely an intrusion.
-- **The `target` column is never fed to the model** — not during training, not during inference. It is only used after the fact to calibrate the detection threshold and measure accuracy.
+- **Inference**: shown any window. If the reconstruction is poor → the window doesn't look
+  normal → likely an intrusion.
+- **The `target` column is never fed to the model** — not during training, not during
+  inference. It is only used after the fact to calibrate the detection threshold and
+  measure accuracy.
 
 ### How the CSV Becomes Windows
 
-The raw CSV contains one row per network flow. The preprocessing script reads the entire CSV and builds **sliding windows** — groups of 10 consecutive flows — automatically. No manual work is required.
+The raw CSV contains one row per network flow. The preprocessing script reads the entire
+CSV and builds **sliding windows** — groups of 10 consecutive flows — automatically.
 
 ```
 CSV (sorted by StartTime):
 
   Row 0:  flow A  →  [Mean, SrcPkts, DstPkts, ..., Sport, Dport, Proto]
   Row 1:  flow B  →  [...]
-  Row 2:  flow C  →  [...]
   ...
-  Row N:  flow N  →  [...]
 
 Sliding window (size=10, stride=1):
 
   Window 0:  rows 0–9
   Window 1:  rows 1–10
-  Window 2:  rows 2–11
   ...
-  Window K:  rows K to K+9
 ```
 
-Each window captures a short snapshot of network activity — 10 flows in sequence. The model looks at the whole group together, not one flow at a time, so it can detect patterns that only emerge across multiple flows (e.g. a port scan, a slow flood).
-
-A window is labeled **attack (1)** if any of its 10 flows belongs to an attack. Otherwise it is labeled **normal (0)**. The label is only used for threshold calibration and evaluation — never as a model input.
+A window is labeled **attack (1)** if any of its 10 flows belongs to an attack. The label
+is only used for threshold calibration and evaluation — never as a model input.
 
 ### How the Data Is Split
-
-After windowing, the full dataset is divided as follows:
 
 ```
 All windows (~1.19M total)
 │
 ├── Normal windows (target = 0)
 │     ├── 80%  →  Training set    (model learns from these)
-│     ├── 10%  →  Validation set  (monitors training, drives early stopping)
-│     └── 10%  →  Test set        (held out — used only in evaluate_cnn.py)
+│     ├── 10%  →  Validation set  (early stopping)
+│     └── 10%  →  Test set        (held out — evaluate_cnn.py only)
 │
 └── Attack windows (target = 1)
       └── 100% →  Test set        (never seen during training)
 ```
-
-The model is trained exclusively on the 80% normal training windows. The 10% normal test windows plus all attack windows form the final **held-out test set** — the model never sees any of these during training or validation. This ensures the evaluation metrics are unbiased.
-
-### How a Window Is Fed to the CNN
-
-Each window is a grid of numbers: 10 rows (flows) × features. The 21 numeric features are passed in directly (z-score normalized using normal-only statistics). The 3 categorical features (Sport, Dport, Proto) are converted to small learned embedding vectors (8 dimensions each), then concatenated with the numeric features.
-
-```
-One window after embedding:
-
-  Shape: (10 flows, 45 combined features)
-         = 10 flows × (21 numeric + 3 categorical × 8-dim embed)
-
-  Rearranged for Conv1d (channels first):
-  Shape: (45 channels, 10 timesteps)
-
-  The CNN slides a kernel of size 3 across the 10-flow dimension,
-  learning which combinations of features across adjacent flows
-  are characteristic of normal traffic.
-```
-
-This is conceptually similar to how a CNN processes a narrow strip image, but there are no image files at any point — everything stays as numerical arrays in memory.
 
 ### Architecture
 
@@ -93,22 +73,20 @@ INPUT
 x_in  (batch, 45, 10)
 
   ↓ ENCODER
-  Conv1d(45→64)  + BatchNorm + ReLU    →  (batch, 64,  10)
+  Conv1d(45→64)  + BatchNorm + ReLU    →  (batch,  64, 10)
   Conv1d(64→128) + BatchNorm + ReLU    →  (batch, 128, 10)
   Conv1d(128→128)+ BatchNorm + ReLU    →  (batch, 128, 10)
   GlobalAveragePool                    →  (batch, 128,  1)
-  Linear(128→128)                      →  (batch, 128)      ← latent vector
+  Linear(128→128)                      →  (batch, 128)      ← 128-dim latent vector
 
   ↓ DECODER
   Linear(128 → 128×10) + ReLU, reshape →  (batch, 128, 10)
   ConvTranspose1d(128→128) + BN + ReLU →  (batch, 128, 10)
   ConvTranspose1d(128→64)  + BN + ReLU →  (batch,  64, 10)
   Conv1d(64→21, kernel=1)              →  (batch,  21, 10)  ← numeric reconstruction
-  + categorical logit heads            →  (batch, vocab, 10) per feature
 
 ANOMALY SCORE (per window)
   MSE( reconstructed_numeric, original_numeric )
-  + 0.1 × normalized cross-entropy on Sport/Dport/Proto predictions
 
   Low score  → window looks normal
   High score → window looks anomalous (likely intrusion)
@@ -116,164 +94,165 @@ ANOMALY SCORE (per window)
 
 ### Detection Threshold
 
-After training, the model scores every window in the held-out **test set** (data never seen during training). The threshold is set at the **99th percentile of the test-normal scores**. Any window with a score above this threshold is flagged as an intrusion.
+After training, the model scores every window in the held-out test set. The threshold is
+set at the **99th percentile of the test-normal scores**. Any window above this threshold
+is flagged as an intrusion.
 
 ---
 
-## Setup
+## Full Pipeline
 
-All scripts are run from the **FLAIR root directory**, not from inside the CNN folder.
+All scripts are run from the **FLAIR root directory**.
 
-### Requirements
-
-Same as the main FLAIR project:
+### Step 0 — Prerequisites
 
 ```bash
+# Training / evaluation (training machine with PyTorch):
 pip install -r requirements.txt
-```
-
-For ONNX export and validation:
-
-```bash
 pip install onnx
+
+# NPU quantization and inference (Ryzen AI machine):
+conda activate ryzen-ai-1.7.0
 ```
 
-For NPU deployment (Ryzen AI):
-
-```bash
-pip install onnxruntime
-# AMD Quark — download from AMD's Ryzen AI Software page
-# https://ryzenai.docs.amd.com
-```
-
-### Preprocessing
-
-If you have not already run the preprocessing step (or you have a fresh CSV), run it once from the FLAIR root. This is shared between the GRU and CNN versions.
+Shared preprocessing (run once, works for both GRU and CNN):
 
 ```bash
 python scripts/preprocess_data.py
 ```
 
-This reads `wustl_iiot_2021.csv` and writes `data/processed/preprocessed.npz`. You do **not** need to re-run this if the `.npz` file already exists.
-
----
-
-## Training
+### Step 1 — Train
 
 ```bash
 python CNN/train_cnn.py
 ```
 
-What happens:
-1. Loads `data/processed/preprocessed.npz`
-2. Filters to **normal-only windows** (target = 0) — attack windows are withheld entirely
-3. Splits normal windows: 80% train / 10% validation / 10% held-out test
-4. Trains for up to 32 epochs with early stopping (patience = 10)
-5. Saves the best checkpoint to `CNN/experiments/results/cnn_minimal.pt`
-
-Training config is in `CNN/config.yaml`. Key settings:
+Trains on normal-only windows. Saves the best checkpoint to
+`CNN/experiments/results/cnn_minimal.pt`. Config in `CNN/config.yaml`.
 
 | Setting | Default | Notes |
-|---|---|---|
+|---------|---------|-------|
 | `batch_size` | 512 | Reduce if you run out of VRAM |
-| `learning_rate` | 0.001 | Adam; do not increase |
+| `learning_rate` | 0.001 | Adam |
 | `epochs` | 32 | Hard cap; early stopping usually kicks in earlier |
 | `patience` | 10 | Epochs without val improvement before stopping |
-| `num_workers` | 0 | Keep 0 on Windows; increase on Linux for faster loading |
-| `encoder_channels` | [64, 128, 128] | Conv channel sizes; increase for more capacity |
+| `encoder_channels` | [64, 128, 128] | Conv channel sizes |
 | `latent_dim` | 128 | Bottleneck size |
 
----
-
-## Evaluation
+### Step 2 — Evaluate
 
 ```bash
 python CNN/evaluate_cnn.py
 ```
 
-This uses the **same seed** as training to reconstruct the exact same train/val/test split, ensuring the test set was never seen by the model. The threshold and all metrics are computed on held-out data only.
+Uses the same seed as training to reconstruct the exact train/val/test split.
+Reports confusion matrix, F1, ROC AUC, PR AUC.
 
-Output printed to console:
-- Confusion matrix (TP / FP / TN / FN)
-- Accuracy, Precision, Recall, F1, FPR
-- ROC AUC and PR AUC (threshold-independent)
-- Best possible F1 (label-informed upper bound, for reference)
+**Saves** `CNN/experiments/results/cnn_deploy_meta.npz` — the detection threshold
+and metadata needed for NPU deployment. **Copy this file to the Ryzen AI machine.**
 
-Output files written:
-- `CNN/experiments/results/anomaly_scores.csv` — flagged anomalous windows only
-- `CNN/experiments/results/anomaly_scores_full.csv` — all test windows with scores
-
----
-
-## Export to ONNX
+### Step 3 — Export to ONNX
 
 ```bash
 python CNN/export_onnx.py
 ```
 
-Exports the trained model to `CNN/experiments/results/cnn_minimal.onnx` using **static input shapes** (required for AMD Quark quantization). The script also prints a list of all ONNX op types in the graph so you can verify NPU compatibility.
+Exports to `CNN/experiments/results/cnn_minimal.onnx` with **static batch size 1**
+(required for AMD Quark). Prints the op list so you can verify NPU compatibility.
 
-Expected ops: `Conv`, `ConvTranspose`, `BatchNormalization`, `Relu`, `GlobalAveragePool`, `Gemm`, `Gather` (embeddings), `Reshape`, `Transpose`.
+**Copy `cnn_minimal.onnx` to the Ryzen AI machine.**
 
----
+### Step 4 — INT8 Quantize (Ryzen AI machine)
 
-## Running on the AMD Ryzen AI NPU
+```bash
+conda activate ryzen-ai-1.7.0
+python CNN/quantize_cnn.py
+```
 
-### Overview
+Uses AMD Quark with the XINT8 preset (PowerOfTwo calibration, QUInt8 activations,
+QInt8 weights) calibrated on 512 held-out normal windows.
 
-The Ryzen AI NPU (XDNA architecture) runs models via the **VitisAI Execution Provider** in ONNX Runtime. Before running on the NPU, the model must be INT8 quantized using **AMD Quark**.
+Output: `CNN/experiments/results/cnn_quantized.onnx`
 
-### Step 1 — Quantize with AMD Quark
+Key decisions made in this script:
+- **CLE disabled** — Cross-Layer Equalization assumes 4D image convolutions; our 1D
+  convolutions have different weight shapes that cause a shape mismatch.
+- **`node_linear` excluded** — the encoder projection Gemm outputs the latent vector,
+  which has both positive and negative values. Quark quantizes it as signed int8, but
+  the VAIML TOSA backend expects unsigned uint8, causing a compilation error. Excluding
+  this one node (keeping it float32 on CPU) resolves the type conflict while leaving all
+  Conv/BN/ReLU layers on the NPU.
 
-Quark performs static INT8 quantization. You need a small calibration dataset (a representative sample of normal windows exported as numpy arrays or a calibration dataloader).
+### Step 5 — Run on the NPU
 
-Follow AMD's Ryzen AI quantization guide:
-[https://ryzenai.docs.amd.com/en/latest/quark/quark_intro.html](https://ryzenai.docs.amd.com/en/latest/quark/quark_intro.html)
+```bash
+conda activate ryzen-ai-1.7.0
+python CNN/infer_cnn_npu.py
+```
 
-The input to Quark is `CNN/experiments/results/cnn_minimal.onnx`. The output is a quantized ONNX model ready for the NPU.
+Scores all ~1.19M windows, reports throughput, and prints TP/FP/TN/FN + F1 metrics.
 
-### Step 2 — Run Inference with VitisAI EP
+```bash
+# Force CPU (for testing without the NPU):
+python CNN/infer_cnn_npu.py --cpu
+
+# Use the unquantized float32 model as a baseline:
+python CNN/infer_cnn_npu.py --onnx CNN/experiments/results/cnn_minimal.onnx --cpu
+```
+
+#### NPU inference code (minimal example)
 
 ```python
 import numpy as np
 import onnxruntime as ort
 
-# Load quantized model with VitisAI Execution Provider
 sess = ort.InferenceSession(
     "CNN/experiments/results/cnn_quantized.onnx",
-    providers=["VitisAIExecutionProvider"],
-    provider_options=[{"config_file": "vaip_config.json"}],  # provided by Ryzen AI SDK
+    providers=["VitisAIExecutionProvider", "CPUExecutionProvider"],
+    provider_options=[{"target": "VAIML", "cacheDir": "/tmp", "cacheKey": "cnn"}, {}],
 )
 
-# Prepare one window (batch size 1, T=10, 21 numeric features)
-x_num = np.zeros((1, 10, 21), dtype=np.float32)   # replace with real data
-x_cat = np.zeros((1, 10,  3), dtype=np.int64)     # Sport/Dport/Proto IDs
+x_num = np.zeros((1, 10, 21), dtype=np.float32)  # one window, 10 flows, 21 features
+x_cat = np.zeros((1, 10,  3), dtype=np.int64)    # Sport / Dport / Proto IDs
 
-outputs = sess.run(["x_hat_num", "latent"], {"x_num": x_num, "x_cat": x_cat})
-x_hat_num = outputs[0]   # (1, 10, 21) — reconstructed numeric features
+# Model has one output: x_hat_num (latent was removed before quantization)
+x_hat_num = sess.run(None, {"x_num": x_num, "x_cat": x_cat})[0]  # (1, 10, 21)
 
-# Compute anomaly score
+meta = np.load("CNN/experiments/results/cnn_deploy_meta.npz")
+threshold = float(meta["threshold"])
+
 anomaly_score = float(np.mean((x_hat_num - x_num) ** 2))
-is_intrusion   = anomaly_score > THRESHOLD   # threshold from evaluate_cnn.py
+is_intrusion  = anomaly_score > threshold
 ```
 
-### Step 3 — Getting the Threshold
+---
 
-The threshold is printed by `evaluate_cnn.py` and saved in `anomaly_scores.csv`. Use that value as `THRESHOLD` in the inference code above.
+## Interactive Demo
 
-### NPU Compatibility Notes
+A Streamlit app in `CNN/demo/` visualizes the model's inference step-by-step.
+See [CNN/demo/README.md](demo/README.md) for setup and launch instructions.
 
-| Op | NPU Support |
-|---|---|
-| `Conv` / `ConvTranspose` | Full support |
-| `BatchNormalization` | Full support |
-| `Relu` | Full support |
-| `GlobalAveragePool` | Full support |
-| `Gemm` (Linear) | Full support |
-| `Gather` (Embedding) | May fall back to CPU |
-| `Reshape` / `Transpose` | Full support |
+Quick start:
 
-If `Gather` (the embedding lookup) causes issues, you can pre-compute embeddings in the preprocessing step and export an embedding-free model that takes `(1, 45, 10)` directly. Open an issue if this is needed and we can add that export path.
+```bash
+conda env create -f CNN/demo/environment.yml   # once
+conda activate cnn-demo
+streamlit run CNN/demo/app.py
+```
+
+---
+
+## NPU Compatibility
+
+| Op | NPU Support | Notes |
+|----|-------------|-------|
+| `Conv` / `ConvTranspose` | Full | Core encoder/decoder ops |
+| `BatchNormalization` | Full | Fused with Conv at runtime |
+| `Relu` | Full | |
+| `GlobalAveragePool` | Full | |
+| `Gemm` (Linear) | Partial | Decoder linear runs on NPU; encoder projection (latent) kept float32 to avoid int8/uint8 type conflict |
+| `Gather` (Embedding) | CPU fallback | Embedding lookup runs on CPU; small overhead |
+| `Reshape` / `Transpose` | Full | |
 
 ---
 
@@ -281,37 +260,40 @@ If `Gather` (the embedding lookup) causes issues, you can pre-compute embeddings
 
 ```
 CNN/
-├── README.md
-├── config.yaml              ← all hyperparameters
-├── train_cnn.py             ← python CNN/train_cnn.py
-├── evaluate_cnn.py          ← python CNN/evaluate_cnn.py
-├── export_onnx.py           ← python CNN/export_onnx.py
+├── README.md                    ← this file
+├── config.yaml                  ← all hyperparameters
+├── vaiml_config.json            ← VitisAI EP pass configuration
+│
+├── train_cnn.py                 ← Step 1: python CNN/train_cnn.py
+├── evaluate_cnn.py              ← Step 2: python CNN/evaluate_cnn.py
+├── export_onnx.py               ← Step 3: python CNN/export_onnx.py
+├── quantize_cnn.py              ← Step 4: python CNN/quantize_cnn.py  (Ryzen AI env)
+├── infer_cnn_npu.py             ← Step 5: python CNN/infer_cnn_npu.py (Ryzen AI env)
+│
 ├── models/
-│   ├── cnn_autoencoder.py   ← main model class (CNNAutoencoder)
-│   ├── cnn_encoder.py       ← Conv1d encoder
-│   └── cnn_decoder.py       ← ConvTranspose1d decoder
+│   ├── cnn_autoencoder.py       ← CNNAutoencoder top-level model
+│   ├── cnn_encoder.py           ← Conv1d encoder
+│   └── cnn_decoder.py           ← ConvTranspose1d decoder
+│
+├── demo/
+│   ├── README.md                ← demo setup and launch instructions
+│   ├── environment.yml          ← conda env for the Streamlit demo (cnn-demo)
+│   ├── app.py                   ← Streamlit UI
+│   ├── inference.py             ← ONNX inference + data loading
+│   └── visualizations.py        ← Plotly chart helpers
+│
 └── experiments/
     └── results/
         ├── cnn_minimal.pt           ← trained PyTorch checkpoint
-        ├── cnn_minimal.onnx         ← exported ONNX model
+        ├── cnn_minimal.onnx         ← float32 ONNX export
+        ├── cnn_quantized.onnx       ← INT8 quantized ONNX (NPU-ready)
+        ├── cnn_deploy_meta.npz      ← detection threshold + metadata
         ├── anomaly_scores.csv       ← flagged windows (anomalous only)
         └── anomaly_scores_full.csv  ← all test windows with scores
 ```
 
-Shared with the GRU version (no duplication):
+Shared with the GRU version:
+
 ```
 data/processed/preprocessed.npz   ← built by scripts/preprocess_data.py
-src/data/dataset.py                ← FLAIRDataset (used by both models)
 ```
-
----
-
-## Comparing CNN vs GRU Results
-
-After training both models you can compare them directly since they use the same preprocessed data and the same evaluation metrics. Key numbers to compare:
-
-- **F1 score** at the 99th percentile threshold
-- **ROC AUC** (threshold-independent)
-- **PR AUC** (more informative when classes are imbalanced)
-
-The CNN version also uses a proper holdout test split (normal windows split 80/10/10; all attack windows held out for test), which gives a cleaner apples-to-apples comparison.

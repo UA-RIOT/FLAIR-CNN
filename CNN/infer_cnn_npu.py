@@ -59,15 +59,15 @@ def build_session(onnx_path: str, vaiml_config: str, force_cpu: bool):
             providers = ["VitisAIExecutionProvider", "CPUExecutionProvider"]
             provider_options = [
                 {
-                    "config_file": str(Path(vaiml_config).resolve()),
-                    "cacheDir":    cache_dir,
-                    "cacheKey":    CACHE_KEY,
+                    "target":                  "VAIML",
+                    "cacheDir":                cache_dir,
+                    "cacheKey":                CACHE_KEY,
+                    "enable_cache_file_io_in_mem": "0",
                 },
                 {},
             ]
-            print(f"[infer] VitisAI EP found — running on Strix NPU")
-            print(f"[infer] vaiml_config: {vaiml_config}")
-            print(f"[infer] NPU cache:    {cache_dir}")
+            print(f"[infer] VitisAI EP found — running on NPU (target=VAIML)")
+            print(f"[infer] NPU cache: {cache_dir}")
         else:
             providers = ["CPUExecutionProvider"]
             provider_options = [{}]
@@ -87,7 +87,7 @@ def run_batch(
     sess,
     npz_path: str,
     threshold: float,
-    batch_size: int = 512,
+    batch_size: int = 512,  # unused — model has static batch=1; kept for CLI compat
 ) -> None:
     bundle = np.load(npz_path, allow_pickle=True)
     X_num = bundle["X_num"].astype(np.float32)
@@ -95,25 +95,22 @@ def run_batch(
     y_seq = bundle["y_seq"].astype(np.int64) if "y_seq" in bundle else None
     N = len(X_num)
 
-    print(f"[infer] Scoring {N:,} windows  (batch_size={batch_size}) ...")
+    print(f"[infer] Scoring {N:,} windows (static batch=1 — exported for NPU) ...")
 
-    all_scores = []
+    scores = np.empty(N, dtype=np.float32)
     t0 = time.perf_counter()
 
-    for start in range(0, N, batch_size):
-        end = min(start + batch_size, N)
-        xn = X_num[start:end]
-        xc = X_cat[start:end]
+    for i in range(N):
+        xn = X_num[i : i + 1]  # (1, 10, 21)
+        xc = X_cat[i : i + 1]  # (1, 10, 3)
+        x_hat_num = sess.run(None, {"x_num": xn, "x_cat": xc})[0]
+        scores[i] = ((x_hat_num - xn) ** 2).mean()
 
-        # CNN ONNX outputs: x_hat_num (B, T, 21) and latent (B, 128)
-        x_hat_num, _ = sess.run(None, {"x_num": xn, "x_cat": xc})
-
-        # Anomaly score: MSE of numeric reconstruction per window
-        scores = ((x_hat_num - xn) ** 2).mean(axis=(1, 2)).astype(np.float32)
-        all_scores.append(scores)
+        if i > 0 and i % 50_000 == 0:
+            elapsed = time.perf_counter() - t0
+            print(f"[infer]   {i:,}/{N:,}  ({i / elapsed:,.0f} win/s)")
 
     elapsed = time.perf_counter() - t0
-    scores = np.concatenate(all_scores)
     flagged = int((scores > threshold).sum())
 
     print(f"[infer] Scored {N:,} windows in {elapsed:.2f}s  ({N / elapsed:,.0f} windows/sec)")
